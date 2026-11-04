@@ -300,3 +300,14 @@ grant execute on function
   public.admin_draw(text),
   public.admin_reset_draw(text)
 to anon, authenticated;
+
+-- ---------- Gruppe löschen ----------
+create or replace function public.admin_delete_group(p_admin_token text)
+returns void language plpgsql volatile security definer set search_path = public as $$
+declare g groups;
+begin
+  g := _admin_group(p_admin_token);
+  delete from groups where id = g.id;
+end $$;
+revoke execute on function public.admin_delete_group(text) from public, anon, authenticated;
+grant execute on function public.admin_delete_group(text) to anon, authenticated;

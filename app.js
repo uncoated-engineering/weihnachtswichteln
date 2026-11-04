@@ -67,10 +67,10 @@
       localStorage.setItem(STORE_KEY, JSON.stringify(s));
     } catch {}
   }
-  function forget(key) {
+  function forgetGroup(code, adminToken) {
     try {
       const s = store();
-      s.groups = s.groups.filter((g) => g.me !== key && g.admin !== key);
+      s.groups = s.groups.filter((g) => g.code !== code && g.admin !== adminToken);
       localStorage.setItem(STORE_KEY, JSON.stringify(s));
     } catch {}
   }
@@ -446,6 +446,14 @@
           <button class="btn ghost" id="copyadmin" type="button">Kopieren</button>
         </div>
       </div>
+
+      <div class="card">
+        <details>
+          <summary>Gruppe löschen</summary>
+          <p class="muted">Löscht die Gruppe endgültig – mit allen Teilnehmern, Wunschzetteln und der Auslosung. Alle Links funktionieren danach nicht mehr.</p>
+          <button class="btn" id="deletegroup" type="button">Gruppe endgültig löschen</button>
+        </details>
+      </div>
     `);
 
     const reload = () => adminView(token, new URLSearchParams());
@@ -495,6 +503,17 @@
     $("#reset")?.addEventListener("click", (e) => {
       if (!confirm("Auslosung wirklich zurücksetzen?")) return;
       act(e.currentTarget, () => rpc("admin_reset_draw", { p_admin_token: token }), "Zurückgesetzt");
+    });
+    $("#deletegroup").addEventListener("click", async (e) => {
+      if (!confirm(`„${d.name}" wirklich endgültig löschen? Das kann nicht rückgängig gemacht werden.`)) return;
+      const btn = e.currentTarget;
+      busy(btn, true, "Wird gelöscht…");
+      try {
+        await rpc("admin_delete_group", { p_admin_token: token });
+        forgetGroup(d.join_code, token);
+        toast("Gruppe gelöscht");
+        location.hash = "#/";
+      } catch (err) { toast(err.message); busy(btn, false); }
     });
     $("#edit").addEventListener("submit", (e) => {
       e.preventDefault();
