@@ -1,26 +1,27 @@
 (() => {
   "use strict";
-  const { supabaseUrl, supabaseKey } = window.WICHTEL_CONFIG;
+  const CFG = window.WICHTEL_CONFIG;
   const app = document.getElementById("app");
   const toastEl = document.getElementById("toast");
   const BASE = location.origin + location.pathname;
-  const STORE_KEY = "wichteln.v1";
+  const SESSION_KEY = "wichteln.session";
 
   // ---------- Helfer ----------
   async function rpc(fn, args = {}) {
-    const res = await fetch(`${supabaseUrl}/rest/v1/rpc/${fn}`, {
+    const res = await fetch(`${CFG.supabaseUrl}/rest/v1/rpc/${fn}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
+      headers: { "Content-Type": "application/json", apikey: CFG.supabaseKey, Authorization: `Bearer ${CFG.supabaseKey}` },
       body: JSON.stringify(args),
     });
     const text = await res.text();
-    const data = text ? JSON.parse(text) : null;
-    if (!res.ok) throw new Error((data && (data.message || data.hint)) || "Etwas ist schiefgelaufen");
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch {}
+    if (!res.ok) throw new Error((data && data.message) || "Das hat nicht geklappt. Bitte nochmal versuchen.");
     return data;
   }
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const h = (html) => { app.innerHTML = html; window.scrollTo(0, 0); };
+  const render = (html) => { app.innerHTML = html; };
   const $ = (sel) => app.querySelector(sel);
   const $$ = (sel) => [...app.querySelectorAll(sel)];
 
@@ -28,448 +29,351 @@
     toastEl.textContent = msg;
     toastEl.classList.add("show");
     clearTimeout(toast._t);
-    toast._t = setTimeout(() => toastEl.classList.remove("show"), 2200);
+    toast._t = setTimeout(() => toastEl.classList.remove("show"), 2600);
   }
-
-  async function copy(text) {
-    try { await navigator.clipboard.writeText(text); toast("Link kopiert"); }
-    catch { prompt("Zum Kopieren:", text); }
+  function busy(btn, on, label) {
+    if (!btn) return;
+    if (on) { btn.dataset.label = btn.innerHTML; btn.disabled = true; if (label) btn.textContent = label; }
+    else { btn.disabled = false; if (btn.dataset.label) btn.innerHTML = btn.dataset.label; }
   }
-
-  // Teilen: auf dem Handy das System-Teilen-Menü (Signal, Mail, SMS…), sonst Text + Link kopieren
   async function share(text, url) {
     const full = url ? `${text}\n${url}` : text;
     if (navigator.share) {
       try { await navigator.share(url ? { text, url } : { text }); return; }
       catch (err) { if (err && err.name === "AbortError") return; }
     }
-    try { await navigator.clipboard.writeText(full); toast("Nachricht kopiert – jetzt z.B. in Signal einfügen"); }
+    try { await navigator.clipboard.writeText(full); toast("Kopiert – jetzt z.B. in Signal einfügen"); }
     catch { prompt("Zum Kopieren:", full); }
   }
-  const shareAttrs = (text, url) => `data-share-text="${esc(text)}" data-share-url="${esc(url)}"`;
 
-  const links = {
-    join: (code) => `${BASE}#/g/${code}`,
-    me: (token) => `${BASE}#/me/${token}`,
-    admin: (token) => `${BASE}#/admin/${token}`,
+  const session = {
+    get() { try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch { return null; } },
+    set(v) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(v)); } catch {} },
+    clear() { try { localStorage.removeItem(SESSION_KEY); } catch {} },
   };
 
-  // Lokale "Meine Gruppen"
-  function store() { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || { groups: [] }; } catch { return { groups: [] }; } }
-  function remember(entry) {
-    try {
-      const s = store();
-      const same = (g) => (entry.me && g.me === entry.me) || (entry.admin && g.admin === entry.admin);
-      const existing = s.groups.find(same) || {};
-      s.groups = s.groups.filter((g) => !same(g));
-      s.groups.unshift({ ...existing, ...entry });
-      s.groups = s.groups.slice(0, 20);
-      localStorage.setItem(STORE_KEY, JSON.stringify(s));
-    } catch {}
-  }
-  function forgetGroup(code, adminToken) {
-    try {
-      const s = store();
-      s.groups = s.groups.filter((g) => g.code !== code && g.admin !== adminToken);
-      localStorage.setItem(STORE_KEY, JSON.stringify(s));
-    } catch {}
-  }
-
-  function metaPills(g) {
-    const p = [];
-    if (g.budget) p.push(`<span class="pill">💶 ${esc(g.budget)}</span>`);
-    if (g.event_date) p.push(`<span class="pill">📅 ${esc(g.event_date)}</span>`);
-    return p.length ? `<div class="meta">${p.join("")}</div>` : "";
-  }
-
-  function errorView(msg) {
-    h(`<div class="card center"><h2>Hoppla</h2><p class="muted">${esc(msg)}</p><a class="btn" href="#/">Zur Startseite</a></div>`);
-  }
-
-  function busy(btn, on, label) {
-    if (!btn) return;
-    if (on) { btn.dataset.label = btn.innerHTML; btn.disabled = true; btn.textContent = label || "…"; }
-    else { btn.disabled = false; btn.innerHTML = btn.dataset.label || btn.innerHTML; }
-  }
-
-  // ---------- Startseite ----------
-  function homeView() {
-    const mine = store().groups;
-    h(`
-      <section class="hero">
-        <h1>Wichteln für die ganze Familie</h1>
-        <p>Gruppe anlegen, Link verschicken, alle tragen sich ein – und dann wird gelost. Jeder sieht nur, wen er selbst beschenkt.</p>
-      </section>
-
-      ${mine.length ? `
-      <div class="card">
-        <h2>Deine Gruppen</h2>
-        <ul class="list">
-          ${mine.map((g) => `
-            <li>
-              <span class="name">${esc(g.groupName || "Gruppe")}${g.name ? ` <span class="muted">· ${esc(g.name)}</span>` : ""}</span>
-              <span class="actions">
-                ${g.me ? `<a class="btn small ghost" href="#/me/${esc(g.me)}">Mein Wichtel</a>` : ""}
-                ${g.admin ? `<a class="btn small ghost" href="#/admin/${esc(g.admin)}">Verwalten</a>` : ""}
-              </span>
-            </li>`).join("")}
-        </ul>
-      </div>` : ""}
-
-      <div class="card">
-        <h2>Neue Wichtelgruppe</h2>
-        <form id="create">
-          <div id="err"></div>
-          <div class="field">
-            <label for="gname">Name der Gruppe</label>
-            <input id="gname" required maxlength="80" placeholder="z.B. Familie Weihnachten 2026">
-          </div>
-          <div class="field">
-            <label for="aname">Dein Name <span class="hint">– du machst selbst mit</span></label>
-            <input id="aname" required maxlength="60" placeholder="z.B. Titi" autocomplete="given-name">
-          </div>
-          <div class="row stack">
-            <div class="field">
-              <label for="budget">Budget <span class="hint">(optional)</span></label>
-              <input id="budget" maxlength="40" placeholder="z.B. 25 €">
-            </div>
-            <div class="field">
-              <label for="date">Bescherung <span class="hint">(optional)</span></label>
-              <input id="date" maxlength="40" placeholder="z.B. 24.12. bei Oma">
-            </div>
-          </div>
-          <div class="field">
-            <label for="msg">Nachricht an alle <span class="hint">(optional)</span></label>
-            <textarea id="msg" maxlength="500" placeholder="z.B. Bitte nur selbstgemachte oder gebrauchte Geschenke 🌲"></textarea>
-          </div>
-          <button class="btn block" type="submit">Gruppe erstellen</button>
-        </form>
-      </div>
-
-      <div class="card">
-        <h2>Einladung bekommen?</h2>
-        <form id="joincode" class="linkbox">
-          <input id="code" placeholder="Code, z.B. K7QH2M" maxlength="12" autocapitalize="characters" aria-label="Gruppencode">
-          <button class="btn ghost" type="submit">Beitreten</button>
-        </form>
-      </div>
-    `);
-
-    $("#create").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const btn = e.submitter;
-      busy(btn, true, "Wird erstellt…");
-      try {
-        const name = $("#gname").value, me = $("#aname").value;
-        const r = await rpc("create_group", {
-          p_name: name, p_admin_name: me,
-          p_budget: $("#budget").value, p_event_date: $("#date").value, p_message: $("#msg").value,
-        });
-        remember({ groupName: name.trim(), name: me.trim(), admin: r.admin_token, me: r.participant_token, code: r.join_code });
-        location.hash = `#/admin/${r.admin_token}?neu=1`;
-      } catch (err) {
-        $("#err").innerHTML = `<div class="error">${esc(err.message)}</div>`;
-        busy(btn, false);
-      }
-    });
-    $("#joincode").addEventListener("submit", (e) => {
-      e.preventDefault();
-      const c = $("#code").value.trim().toUpperCase();
-      if (c) location.hash = `#/g/${c}`;
-    });
-  }
-
-  // ---------- Beitreten ----------
-  async function joinView(code) {
-    let g;
-    try { g = await rpc("get_group", { p_join_code: code }); }
-    catch (err) { return errorView(err.message); }
-
-    const known = store().groups.find((x) => x.code === code && x.me);
-
-    h(`
-      <div class="card">
-        <p class="muted" style="margin-bottom:4px">Du bist eingeladen zu</p>
+  function head(g) {
+    const facts = [];
+    if (g.event_date) facts.push(`<span>🎄 ${esc(g.event_date)}</span>`);
+    if (g.budget) facts.push(`<span>Budget: ${esc(g.budget)}</span>`);
+    return `
+      <header class="head">
+        <p class="year">Wichteln ${esc(CFG.year)}</p>
         <h1>${esc(g.name)}</h1>
-        ${metaPills(g)}
-        ${g.message ? `<p class="wishlist-text">${esc(g.message)}</p>` : ""}
-      </div>
+        ${facts.length ? `<div class="facts">${facts.join("")}</div>` : ""}
+      </header>`;
+  }
 
-      ${known ? `<div class="notice">Du bist in dieser Gruppe schon als <strong>${esc(known.name)}</strong> angemeldet. <a href="#/me/${esc(known.me)}">Zu deiner Seite →</a></div>` : ""}
+  function failView(msg) {
+    render(`<div class="sheet center"><p>${esc(msg)}</p><button class="btn" type="button" id="retry">Nochmal laden</button></div>`);
+    $("#retry").addEventListener("click", () => route());
+  }
 
-      ${g.drawn ? `
-        <div class="card"><p>Die Auslosung hat schon stattgefunden. Wenn du mitmachst, schickt dir der Organisator deinen persönlichen Link.</p></div>
-      ` : `
-      <div class="card">
-        <h2>Mitmachen</h2>
-        <form id="join">
-          <div id="err"></div>
-          <div class="field">
-            <label for="name">Wer bist du?</label>
-            <input id="name" required maxlength="60" placeholder="Dein Name" autocomplete="given-name">
-          </div>
-          <button class="btn block" type="submit">Anmelden</button>
-        </form>
-      </div>`}
+  // ---------- Start: Wer bist du? ----------
+  async function startView() {
+    const s = session.get();
+    if (s && s.token) return meView(s.token);
 
-      <div class="card">
-        <h3>Schon dabei (${g.participants.length})</h3>
-        <div class="names">${g.participants.map((p) => `<span class="pill">${esc(p.name)}</span>`).join("") || '<span class="muted">Noch niemand</span>'}</div>
+    let g;
+    try { g = await rpc("family_get", { p_join_code: CFG.familyCode }); }
+    catch (err) { return failView(err.message); }
+
+    const people = g.participants;
+    render(`
+      ${head(g)}
+      ${g.message ? `<div class="sheet"><p class="note">${esc(g.message)}</p></div>` : ""}
+      <div class="sheet">
+        <h2>Wer bist du?</h2>
+        ${people.length
+          ? `<p class="quiet">Tippe auf deinen Namen.</p>
+             <div class="tags">${people.map((p) => `<button class="tag-btn" type="button" data-id="${esc(p.id)}">${esc(p.name)}</button>`).join("")}</div>`
+          : `<p class="quiet">Noch hat sich niemand eingetragen. Fang du an!</p>`}
+        ${g.drawn
+          ? `<p class="quiet small">Die Namen sind schon gezogen. Wenn du fehlst, sag dem Organisator Bescheid.</p>`
+          : `<button class="btn ${people.length ? "plain" : ""} block" type="button" id="new">Ich bin neu hier</button>`}
       </div>
     `);
 
-    const form = $("#join");
-    if (form) form.addEventListener("submit", async (e) => {
+    $$(".tag-btn").forEach((b) => b.addEventListener("click", () => {
+      pinView(g, people.find((p) => p.id === b.dataset.id));
+    }));
+    $("#new")?.addEventListener("click", () => newView(g));
+  }
+
+  // ---------- PIN eingeben ----------
+  function pinView(g, person) {
+    const first = !person.has_pin;
+    render(`
+      ${head(g)}
+      <div class="sheet">
+        <h2>Hallo ${esc(person.name)}!</h2>
+        <form id="pinform">
+          <p class="quiet">${first
+            ? "Denk dir eine PIN aus 4 Ziffern aus. Damit kommst du jederzeit wieder rein – auch von einem anderen Gerät."
+            : "Gib deine PIN ein."}</p>
+          <div class="field">
+            <label for="pin" class="center">${first ? "Neue PIN" : "PIN"}</label>
+            <input id="pin" class="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" required>
+          </div>
+          <p id="err" class="error center" hidden></p>
+          <button class="btn block" type="submit">${first ? "PIN festlegen" : "Weiter"}</button>
+        </form>
+        <p class="center" style="margin-top:14px"><button class="linkish" type="button" id="back">Das bin ich nicht</button></p>
+        ${first ? "" : `<p class="quiet small center">PIN vergessen? Sag dem Organisator Bescheid, er setzt sie zurück.</p>`}
+      </div>
+    `);
+    const input = $("#pin");
+    input.focus();
+    input.addEventListener("input", () => {
+      input.value = input.value.replace(/\D/g, "").slice(0, 4);
+      if (input.value.length === 4) $("#pinform").requestSubmit();
+    });
+    $("#back").addEventListener("click", () => startView());
+    $("#pinform").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const btn = e.submitter;
-      busy(btn, true, "Melde an…");
+      const btn = $("#pinform button[type=submit]");
+      if (btn.disabled) return;
+      busy(btn, true, "Einen Moment…");
       try {
-        const name = $("#name").value.trim();
-        const r = await rpc("join_group", { p_join_code: code, p_name: name });
-        remember({ groupName: g.name, name, me: r.participant_token, code });
-        location.hash = `#/me/${r.participant_token}?neu=1`;
+        const r = await rpc("family_login", { p_join_code: CFG.familyCode, p_participant_id: person.id, p_pin: input.value });
+        session.set({ token: r.participant_token, name: person.name });
+        if (r.pin_set) toast("PIN gespeichert – gut merken!");
+        meView(r.participant_token);
       } catch (err) {
-        $("#err").innerHTML = `<div class="error">${esc(err.message)}</div>`;
+        const el = $("#err"); el.textContent = err.message; el.hidden = false;
+        input.value = ""; input.focus();
         busy(btn, false);
       }
     });
   }
 
-  // ---------- Persönliche Seite ----------
-  async function meView(token, params) {
+  // ---------- Neu dabei ----------
+  function newView(g) {
+    render(`
+      ${head(g)}
+      <div class="sheet">
+        <h2>Schön, dass du dabei bist</h2>
+        <form id="newform">
+          <div class="field">
+            <label for="name">Dein Name</label>
+            <input id="name" maxlength="60" required autocomplete="given-name" placeholder="So, wie die Familie dich nennt">
+          </div>
+          <div class="field">
+            <label for="pin">Denk dir eine PIN aus 4 Ziffern aus</label>
+            <input id="pin" class="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" required>
+            <p class="quiet small center" style="margin-top:6px">Damit kommst du später wieder rein.</p>
+          </div>
+          <p id="err" class="error" hidden></p>
+          <button class="btn block" type="submit">Eintragen</button>
+        </form>
+        <p class="center" style="margin-top:14px"><button class="linkish" type="button" id="back">Zurück</button></p>
+      </div>
+    `);
+    $("#name").focus();
+    const pin = $("#pin");
+    pin.addEventListener("input", () => { pin.value = pin.value.replace(/\D/g, "").slice(0, 4); });
+    $("#back").addEventListener("click", () => startView());
+    $("#newform").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = e.submitter || $("#newform button[type=submit]");
+      const name = $("#name").value.trim();
+      busy(btn, true, "Wird eingetragen…");
+      try {
+        const r = await rpc("family_join", { p_join_code: CFG.familyCode, p_name: name, p_pin: pin.value });
+        session.set({ token: r.participant_token, name });
+        toast("Du bist eingetragen!");
+        meView(r.participant_token);
+      } catch (err) {
+        const el = $("#err"); el.textContent = err.message; el.hidden = false;
+        busy(btn, false);
+      }
+    });
+  }
+
+  // ---------- Meine Seite ----------
+  async function meView(token) {
     let d;
     try { d = await rpc("get_me", { p_token: token }); }
-    catch (err) { return errorView(err.message); }
+    catch (err) {
+      if (/Ungültig/.test(err.message)) { session.clear(); return startView(); }
+      return failView(err.message);
+    }
     const g = d.group;
-    remember({ groupName: g.name, name: d.name, me: token, code: g.join_code });
-    const myLink = links.me(token);
-    const revealed = sessionStorage.getItem("revealed." + token) === "1";
+    const opened = sessionStorage.getItem("opened." + token) === "1";
 
-    h(`
-      ${params.get("neu") ? `<div class="notice">🎉 Du bist angemeldet! Dieser Link ist <strong>nur für dich</strong> – speichere ihn als Lesezeichen, damit du nach der Auslosung deinen Wichtel siehst. Auf diesem Gerät findest du ihn auch auf der Startseite.</div>` : ""}
-
-      <div class="card">
-        <p class="muted" style="margin-bottom:4px">Hallo ${esc(d.name)} 👋</p>
-        <h1>${esc(g.name)}</h1>
-        ${metaPills(g)}
-        ${g.message ? `<p class="wishlist-text">${esc(g.message)}</p>` : ""}
+    render(`
+      ${head(g)}
+      <div class="sheet">
+        <div class="hello">
+          <h2>Hallo ${esc(d.name)}</h2>
+          <button class="linkish small" type="button" id="logout">Nicht du?</button>
+        </div>
+        ${d.receiver
+          ? `<div class="reveal" id="reveal">${opened ? tagHtml(d.receiver) : `
+              <p>Die Namen sind gezogen.</p>
+              <button class="gift" type="button" id="open" aria-label="Geschenk öffnen">
+                <span class="box"></span><span class="lid"></span><span class="ribbon-v"></span><span class="bow"></span>
+              </button>
+              <p class="quiet">Tippe auf das Geschenk und schau, wen du beschenkst.<br>Nicht verraten!</p>`}
+            </div>`
+          : `<p>Noch wird nicht gelost. Sobald alle eingetragen sind, werden die Namen gezogen – schau dann einfach wieder hier vorbei.</p>
+             <p class="quiet small" style="margin-top:14px">Schon dabei:</p>
+             <div class="names">${d.participants.map((p) => `<span>${esc(p.name)}</span>`).join("")}</div>`}
       </div>
 
-      ${d.receiver ? `
-        <div class="card reveal" id="reveal">
-          ${revealed ? receiverHtml(d.receiver) : `
-            <p class="muted">Die Lose sind gezogen!</p>
-            <button class="gift" id="open" aria-label="Geschenk öffnen">🎁</button>
-            <p class="muted" style="margin-top:12px">Tippe auf das Geschenk, um zu sehen, wen du beschenkst.<br>Schau, dass dir niemand über die Schulter guckt 🤫</p>`}
-        </div>
-      ` : `
-        <div class="card center">
-          <p style="font-size:2.2rem;margin:0">⏳</p>
-          <h2>Noch nicht ausgelost</h2>
-          <p class="muted">Sobald der Organisator auslost, siehst du hier, wen du beschenkst. Komm einfach später über diesen Link wieder.</p>
-          <div class="names" style="justify-content:center">${d.participants.map((p) => `<span class="pill">${esc(p.name)}</span>`).join("")}</div>
-        </div>
-      `}
+      ${g.message ? `<div class="sheet"><p class="note">${esc(g.message)}</p></div>` : ""}
 
-      <div class="card">
-        <h2>Dein Wunschzettel</h2>
-        <p class="muted">Wer dich zieht, sieht diesen Text. Ideen, Größen, No-Gos – alles hilft.</p>
+      <div class="sheet">
+        <h2>Mein Wunschzettel</h2>
+        <p class="quiet">Wer dich zieht, kann das hier lesen.</p>
         <form id="wish">
-          <textarea id="wishtext" maxlength="2000" placeholder="z.B. Gute Socken (Gr. 43), ein Krimi, Kaffee…">${esc(d.wishlist)}</textarea>
-          <div class="btns" style="margin-top:10px"><button class="btn green" type="submit">Speichern</button></div>
+          <textarea id="wishtext" maxlength="2000" aria-label="Mein Wunschzettel" placeholder="Was würde dich freuen? Größen, Lieblingsfarben, was du auf keinen Fall brauchst…">${esc(d.wishlist)}</textarea>
+          <button class="btn fir" type="submit" style="margin-top:12px">Wunschzettel speichern</button>
         </form>
-      </div>
-
-      <div class="card">
-        <h3>Dein persönlicher Link</h3>
-        <p class="muted">Nicht weitergeben – damit sieht man, wen du gezogen hast.</p>
-        <div class="linkbox">
-          <input readonly value="${esc(myLink)}" aria-label="Persönlicher Link">
-          <button class="btn ghost" id="copyme" type="button">Kopieren</button>
-        </div>
       </div>
     `);
 
-    $("#copyme").addEventListener("click", () => copy(myLink));
+    $("#logout").addEventListener("click", () => { session.clear(); startView(); });
+    $("#open")?.addEventListener("click", () => {
+      sessionStorage.setItem("opened." + token, "1");
+      $("#reveal").innerHTML = tagHtml(d.receiver);
+    });
     $("#wish").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const btn = e.submitter;
-      busy(btn, true, "Speichert…");
+      const btn = e.submitter || $("#wish button");
+      busy(btn, true, "Wird gespeichert…");
       try { await rpc("update_wishlist", { p_token: token, p_wishlist: $("#wishtext").value }); toast("Wunschzettel gespeichert"); }
       catch (err) { toast(err.message); }
       busy(btn, false);
     });
-    const openBtn = $("#open");
-    if (openBtn) openBtn.addEventListener("click", () => {
-      sessionStorage.setItem("revealed." + token, "1");
-      $("#reveal").innerHTML = receiverHtml(d.receiver);
-    });
   }
 
-  function receiverHtml(r) {
+  function tagHtml(r) {
     return `
-      <p class="muted" style="margin:0">Du beschenkst</p>
-      <div class="receiver-name">${esc(r.name)}</div>
-      <p class="muted">Psst – nicht verraten! 🤫</p>
-      ${r.wishlist ? `<h3 style="margin-top:18px">Wunschzettel von ${esc(r.name)}</h3><div class="wishlist-text">${esc(r.wishlist)}</div>`
-        : `<p class="muted" style="margin-top:14px">${esc(r.name)} hat noch keinen Wunschzettel geschrieben. Schau später nochmal vorbei.</p>`}
-    `;
+      <div class="for-tag"><span class="for">Für:</span><span class="who">${esc(r.name)}</span></div>
+      ${r.wishlist
+        ? `<p class="quiet" style="margin-bottom:6px;text-align:left">Wunschzettel von ${esc(r.name)}:</p><div class="wish">${esc(r.wishlist)}</div>`
+        : `<p class="quiet">${esc(r.name)} hat noch keinen Wunschzettel geschrieben. Schau später nochmal vorbei.</p>`}`;
   }
 
-  // ---------- Admin ----------
-  async function adminView(token, params) {
+  // ---------- Organisator ----------
+  async function adminView(token) {
     let d;
     try { d = await rpc("admin_get", { p_admin_token: token }); }
-    catch (err) { return errorView(err.message); }
-    remember({ groupName: d.name, admin: token, code: d.join_code });
+    catch (err) { return failView(err.message); }
 
-    const joinLink = links.join(d.join_code);
     const byId = Object.fromEntries(d.participants.map((p) => [p.id, p]));
-    const inviteText = `🎁 Wichteln: ${d.name}! Trag dich hier ein:`;
-    const seenCount = d.participants.filter((p) => p.seen).length;
+    const seen = d.participants.filter((p) => p.seen).length;
+    const inviteText = `🎁 Wichteln ${CFG.year}! Trag dich hier ein und schreib deinen Wunschzettel:`;
 
-    h(`
-      ${params.get("neu") ? `<div class="notice">✅ Gruppe erstellt! Das hier ist deine <strong>Verwaltungsseite</strong> – speichere den Link. Schick jetzt den Einladungslink an alle.</div>` : ""}
-
-      <div class="card">
-        <p class="muted" style="margin-bottom:4px">Verwaltung</p>
-        <h1>${esc(d.name)}</h1>
-        ${metaPills(d)}
-        <div class="meta">
-          <span class="pill">👥 ${d.participants.length} Teilnehmer</span>
-          ${d.drawn ? `<span class="pill ok">✔ Ausgelost</span>` : `<span class="pill">Noch nicht ausgelost</span>`}
-          <span class="pill">Code <span class="code">${esc(d.join_code)}</span></span>
+    render(`
+      ${head(d)}
+      <div class="sheet">
+        <h2>Organisieren</h2>
+        <p class="quiet">Diese Seite ist nur für dich. Behalte den Link für dich.</p>
+        <p>Schick allen diesen Link:</p>
+        <div class="row" style="margin-bottom:10px">
+          <input readonly value="${esc(BASE)}" aria-label="Link für die Familie">
         </div>
+        <button class="btn fir block" type="button" id="invite">Link teilen</button>
       </div>
 
-      ${!d.drawn ? `
-      <div class="card">
-        <h2>1. Einladen</h2>
-        <p class="muted">Schick diesen Link in die Familiengruppe. Jeder trägt sich selbst ein und bekommt seinen eigenen Link.</p>
-        <div class="linkbox" style="margin-bottom:10px">
-          <input readonly value="${esc(joinLink)}" aria-label="Einladungslink">
-          <button class="btn ghost" id="copyjoin" type="button">Kopieren</button>
-        </div>
-        <div class="btns">
-          <button class="btn green" type="button" ${shareAttrs(inviteText, joinLink)}>Einladung teilen</button>
-        </div>
-      </div>` : ""}
-
-      <div class="card">
-        <h2>${d.drawn ? "Teilnehmer" : "2. Teilnehmer"}</h2>
-        ${d.drawn
-          ? `<p class="muted">${seenCount} von ${d.participants.length} haben schon nachgeschaut. Wer den eigenen Link verloren hat, bekommt ihn hier von dir.</p>`
-          : `<p class="muted">Du kannst auch Leute selbst eintragen (z.B. Kinder oder Oma ohne Handy) und ihnen den persönlichen Link schicken oder ihn für sie öffnen.</p>`}
+      <div class="sheet">
+        <h2>Dabei (${d.participants.length})</h2>
+        ${d.drawn ? `<p class="quiet">${seen} von ${d.participants.length} haben schon nachgeschaut.</p>` : ""}
         <ul class="list">
           ${d.participants.map((p) => `
             <li>
-              <span class="name">${esc(p.name)}
-                ${d.drawn ? (p.seen ? ' <span class="pill ok">gesehen</span>' : ' <span class="pill">offen</span>') : ""}
-                ${p.has_wishlist ? ' <span class="pill" title="Hat einen Wunschzettel">📝</span>' : ""}
+              <span class="who">${esc(p.name)}
+                <span class="state">${[
+                  p.locked ? "gesperrt – zu oft falsche PIN" : (p.has_pin ? "PIN gesetzt" : "noch keine PIN"),
+                  p.has_wishlist ? "Wunschzettel ✓" : "",
+                  d.drawn ? (p.seen ? "hat nachgeschaut" : "noch nicht nachgeschaut") : "",
+                ].filter(Boolean).join(", ")}</span>
               </span>
-              <span class="actions">
-                <button class="btn small ghost" type="button" ${shareAttrs(`🎁 ${d.name}: Hier ist dein persönlicher Wichtel-Link, ${p.name} (nicht weitergeben!):`, links.me(p.token))} title="Persönlichen Link schicken">Teilen</button>
-                <button class="btn small ghost" data-copy="${esc(links.me(p.token))}" type="button" title="Persönlichen Link kopieren">Link</button>
-                ${!d.drawn ? `<button class="btn small danger-text" data-remove="${esc(p.id)}" data-name="${esc(p.name)}" type="button" title="Entfernen">✕</button>` : ""}
+              <span class="acts">
+                ${p.has_pin || p.locked ? `<button class="btn plain small" type="button" data-resetpin="${esc(p.id)}" data-name="${esc(p.name)}">PIN zurücksetzen</button>` : ""}
+                ${!d.drawn ? `<button class="btn plain small" type="button" data-remove="${esc(p.id)}" data-name="${esc(p.name)}" aria-label="${esc(p.name)} entfernen">Entfernen</button>` : ""}
               </span>
             </li>`).join("")}
         </ul>
         ${!d.drawn ? `
-          <form id="add" class="linkbox" style="margin-top:12px">
-            <input id="addname" maxlength="60" placeholder="Name hinzufügen" aria-label="Name hinzufügen">
-            <button class="btn ghost" type="submit">Hinzufügen</button>
-          </form>` : ""}
+          <form id="add" class="row">
+            <input id="addname" maxlength="60" placeholder="Jemanden eintragen, z.B. Opa" aria-label="Name">
+            <button class="btn plain" type="submit" style="flex:0 0 auto">Eintragen</button>
+          </form>
+          <p class="quiet small" style="margin-top:8px">Wer von dir eingetragen wird, legt beim ersten Antippen seines Namens selbst eine PIN fest.</p>` : ""}
       </div>
 
       ${!d.drawn ? `
-      <div class="card">
+      <div class="sheet">
         <details ${d.exclusions.length ? "open" : ""}>
-          <summary>Ausschlüsse <span class="hint">(optional – z.B. Paare sollen sich nicht gegenseitig ziehen)</span></summary>
-          ${d.exclusions.length ? `<div style="margin-bottom:12px">${d.exclusions.map((x) => `
-            <div class="excl-item">
-              <span>${esc(byId[x.a]?.name)} ⇄ ${esc(byId[x.b]?.name)}</span>
-              <button class="btn small danger-text" data-unexcl="${esc(x.a)}|${esc(x.b)}" type="button">Entfernen</button>
-            </div>`).join("")}</div>` : ""}
+          <summary>Wer soll sich nicht gegenseitig ziehen?</summary>
+          ${d.exclusions.map((x) => `
+            <div class="hello" style="margin-bottom:6px">
+              <span>${esc(byId[x.a]?.name)} und ${esc(byId[x.b]?.name)}</span>
+              <button class="btn plain small" type="button" data-unexcl="${esc(x.a)}|${esc(x.b)}">Aufheben</button>
+            </div>`).join("")}
           ${d.participants.length >= 2 ? `
-          <form id="excl">
-            <div class="row">
+          <form id="excl" style="margin-top:10px">
+            <div class="row stack">
               <select id="ea" aria-label="Person 1">${d.participants.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>
               <select id="eb" aria-label="Person 2">${d.participants.map((p, i) => `<option value="${esc(p.id)}" ${i === 1 ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
             </div>
-            <button class="btn ghost block" type="submit" style="margin-top:10px">Diese zwei ziehen sich nicht</button>
-          </form>` : `<p class="muted">Erst ein paar Teilnehmer hinzufügen.</p>`}
+            <button class="btn plain block" type="submit" style="margin-top:10px">Diese zwei nicht</button>
+          </form>` : `<p class="quiet">Dafür braucht es mindestens zwei Leute.</p>`}
         </details>
       </div>
 
-      <div class="card">
-        <h2>3. Auslosen</h2>
-        <p class="muted">Wenn alle drin sind: auslosen. Niemand – auch du nicht – sieht die ganze Zuordnung. Jeder sieht nur seinen eigenen Wichtel über seinen persönlichen Link.</p>
-        <div id="drawerr"></div>
-        <button class="btn block" id="draw" type="button" ${d.participants.length < 3 ? "disabled" : ""}>🎲 Jetzt auslosen</button>
-        ${d.participants.length < 3 ? `<p class="hint center" style="margin-top:8px">Mindestens 3 Teilnehmer nötig.</p>` : ""}
-      </div>
-      ` : `
-      <div class="card">
-        <h2>Ausgelost 🎉</h2>
-        <p class="muted">Sag allen Bescheid, dass sie über ihren persönlichen Link nachschauen können.</p>
-        <div class="btns">
-          <button class="btn green" type="button" ${shareAttrs(`🎁 ${d.name}: Die Lose sind gezogen! Schaut über euren persönlichen Link nach, wen ihr beschenkt. Link verloren? Sagt mir Bescheid.`, "")}>Allen Bescheid sagen</button>
-        </div>
-        <details style="margin-top:16px">
-          <summary class="muted">Auslosung zurücksetzen</summary>
-          <p class="muted">Löscht die aktuelle Zuordnung, z.B. wenn noch jemand dazukommt. Danach muss neu gelost werden und alle müssen erneut nachschauen.</p>
-          <button class="btn ghost" id="reset" type="button">Zurücksetzen</button>
+      <div class="sheet">
+        <h2>Namen ziehen</h2>
+        <p class="quiet">Wenn alle dabei sind. Niemand sieht die ganze Liste – auch du nicht. Danach kann sich niemand mehr neu eintragen.</p>
+        <p id="drawerr" class="error" hidden></p>
+        <button class="btn block" type="button" id="draw" ${d.participants.length < 3 ? "disabled" : ""}>Jetzt auslosen</button>
+        ${d.participants.length < 3 ? `<p class="quiet small center" style="margin-top:8px">Mindestens 3 Leute nötig.</p>` : ""}
+      </div>` : `
+      <div class="sheet">
+        <h2>Ausgelost</h2>
+        <p>Sag allen Bescheid, dass sie nachschauen können.</p>
+        <button class="btn fir block" type="button" id="tellall">Nachricht an alle teilen</button>
+        <details style="margin-top:18px">
+          <summary class="quiet">Neu auslosen</summary>
+          <p class="quiet">Löscht die jetzige Zuordnung, z.B. wenn noch jemand dazukommt. Danach musst du neu auslosen und alle müssen nochmal nachschauen.</p>
+          <button class="btn plain" type="button" id="reset">Auslosung zurücksetzen</button>
         </details>
-      </div>
-      `}
+      </div>`}
 
-      <div class="card">
+      <div class="sheet">
         <details>
-          <summary>Gruppe bearbeiten</summary>
+          <summary>Texte bearbeiten</summary>
           <form id="edit">
-            <div class="field"><label for="ename">Name</label><input id="ename" maxlength="80" value="${esc(d.name)}" required></div>
+            <div class="field"><label for="ename">Überschrift</label><input id="ename" maxlength="80" value="${esc(d.name)}" required></div>
             <div class="row stack">
-              <div class="field"><label for="ebudget">Budget</label><input id="ebudget" maxlength="40" value="${esc(d.budget)}"></div>
-              <div class="field"><label for="edate">Bescherung</label><input id="edate" maxlength="40" value="${esc(d.event_date)}"></div>
+              <div class="field"><label for="edate">Wann</label><input id="edate" maxlength="40" value="${esc(d.event_date)}" placeholder="z.B. 24. Dezember"></div>
+              <div class="field"><label for="ebudget">Budget</label><input id="ebudget" maxlength="40" value="${esc(d.budget)}" placeholder="z.B. 25 €"></div>
             </div>
             <div class="field"><label for="emsg">Nachricht an alle</label><textarea id="emsg" maxlength="500">${esc(d.message)}</textarea></div>
-            <button class="btn ghost" type="submit">Speichern</button>
+            <button class="btn fir" type="submit">Speichern</button>
           </form>
-        </details>
-      </div>
-
-      <div class="card">
-        <h3>Dein Verwaltungslink</h3>
-        <p class="muted">Gut aufheben und nicht teilen – damit kann man die Gruppe verwalten.</p>
-        <div class="linkbox">
-          <input readonly value="${esc(links.admin(token))}" aria-label="Verwaltungslink">
-          <button class="btn ghost" id="copyadmin" type="button">Kopieren</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <details>
-          <summary>Gruppe löschen</summary>
-          <p class="muted">Löscht die Gruppe endgültig – mit allen Teilnehmern, Wunschzetteln und der Auslosung. Alle Links funktionieren danach nicht mehr.</p>
-          <button class="btn" id="deletegroup" type="button">Gruppe endgültig löschen</button>
         </details>
       </div>
     `);
 
-    const reload = () => adminView(token, new URLSearchParams());
+    const reload = () => adminView(token);
     const act = async (btn, fn, ok) => {
       busy(btn, true);
       try { await fn(); if (ok) toast(ok); await reload(); }
       catch (err) { toast(err.message); busy(btn, false); }
     };
 
-    $("#copyadmin").addEventListener("click", () => copy(links.admin(token)));
-    $("#copyjoin")?.addEventListener("click", () => copy(joinLink));
-    $$("[data-share-text]").forEach((b) => b.addEventListener("click", () => share(b.dataset.shareText, b.dataset.shareUrl)));
-    $$("[data-copy]").forEach((b) => b.addEventListener("click", () => copy(b.dataset.copy)));
+    $("#invite").addEventListener("click", () => share(inviteText, BASE));
+    $("#tellall")?.addEventListener("click", () => share(`🎁 Die Wichtel-Namen sind gezogen! Schaut hier nach, wen ihr beschenkt:`, BASE));
+    $$("[data-resetpin]").forEach((b) => b.addEventListener("click", () =>
+      act(b, () => rpc("admin_reset_pin", { p_admin_token: token, p_participant_id: b.dataset.resetpin }),
+        `PIN von ${b.dataset.name} zurückgesetzt – beim nächsten Mal neue PIN wählen`)));
     $$("[data-remove]").forEach((b) => b.addEventListener("click", () => {
       if (!confirm(`${b.dataset.name} wirklich entfernen?`)) return;
-      act(b, () => rpc("admin_remove_participant", { p_admin_token: token, p_participant_id: b.dataset.remove }), "Entfernt");
+      act(b, () => rpc("admin_remove_participant", { p_admin_token: token, p_participant_id: b.dataset.remove }), `${b.dataset.name} entfernt`);
     }));
     $$("[data-unexcl]").forEach((b) => b.addEventListener("click", () => {
       const [a, bb] = b.dataset.unexcl.split("|");
@@ -479,41 +383,24 @@
       e.preventDefault();
       const name = $("#addname").value.trim();
       if (!name) return;
-      act(e.submitter, () => rpc("admin_add_participant", { p_admin_token: token, p_name: name }), `${name} hinzugefügt`);
+      act(e.submitter, () => rpc("admin_add_participant", { p_admin_token: token, p_name: name }), `${name} eingetragen`);
     });
     $("#excl")?.addEventListener("submit", (e) => {
       e.preventDefault();
       const a = $("#ea").value, b = $("#eb").value;
       if (a === b) return toast("Bitte zwei verschiedene Personen wählen");
-      act(e.submitter, () => rpc("admin_set_exclusion", { p_admin_token: token, p_a: a, p_b: b, p_excluded: true }), "Ausschluss gespeichert");
+      act(e.submitter, () => rpc("admin_set_exclusion", { p_admin_token: token, p_a: a, p_b: b, p_excluded: true }), "Gespeichert");
     });
     $("#draw")?.addEventListener("click", async (e) => {
-      if (!confirm(`Jetzt mit ${d.participants.length} Teilnehmern auslosen? Danach kann sich niemand mehr selbst anmelden.`)) return;
+      if (!confirm(`Jetzt mit ${d.participants.length} Leuten auslosen?`)) return;
       const btn = e.currentTarget;
-      busy(btn, true, "Lose werden gezogen…");
-      try {
-        await rpc("admin_draw", { p_admin_token: token });
-        toast("Ausgelost! 🎉");
-        await reload();
-      } catch (err) {
-        $("#drawerr").innerHTML = `<div class="error">${esc(err.message)}</div>`;
-        busy(btn, false);
-      }
+      busy(btn, true, "Namen werden gezogen…");
+      try { await rpc("admin_draw", { p_admin_token: token }); toast("Ausgelost!"); await reload(); }
+      catch (err) { const el = $("#drawerr"); el.textContent = err.message; el.hidden = false; busy(btn, false); }
     });
     $("#reset")?.addEventListener("click", (e) => {
       if (!confirm("Auslosung wirklich zurücksetzen?")) return;
       act(e.currentTarget, () => rpc("admin_reset_draw", { p_admin_token: token }), "Zurückgesetzt");
-    });
-    $("#deletegroup").addEventListener("click", async (e) => {
-      if (!confirm(`„${d.name}" wirklich endgültig löschen? Das kann nicht rückgängig gemacht werden.`)) return;
-      const btn = e.currentTarget;
-      busy(btn, true, "Wird gelöscht…");
-      try {
-        await rpc("admin_delete_group", { p_admin_token: token });
-        forgetGroup(d.join_code, token);
-        toast("Gruppe gelöscht");
-        location.hash = "#/";
-      } catch (err) { toast(err.message); busy(btn, false); }
     });
     $("#edit").addEventListener("submit", (e) => {
       e.preventDefault();
@@ -526,14 +413,9 @@
 
   // ---------- Router ----------
   function route() {
-    const raw = location.hash.replace(/^#\/?/, "");
-    const [path, query] = raw.split("?");
-    const params = new URLSearchParams(query || "");
-    const parts = path.split("/").filter(Boolean);
-    if (parts[0] === "g" && parts[1]) return joinView(parts[1].toUpperCase());
-    if (parts[0] === "me" && parts[1]) return meView(parts[1], params);
-    if (parts[0] === "admin" && parts[1]) return adminView(parts[1], params);
-    return homeView();
+    const m = location.hash.match(/^#\/admin\/([a-f0-9]+)/);
+    if (m) return adminView(m[1]);
+    return startView();
   }
   window.addEventListener("hashchange", route);
   route();
