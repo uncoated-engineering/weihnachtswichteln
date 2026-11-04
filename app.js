@@ -36,14 +36,17 @@
     catch { prompt("Zum Kopieren:", text); }
   }
 
-  function share(text, url) {
+  // Teilen: auf dem Handy das System-Teilen-Menü (Signal, Mail, SMS…), sonst Text + Link kopieren
+  async function share(text, url) {
+    const full = url ? `${text}\n${url}` : text;
     if (navigator.share) {
-      navigator.share({ text, url }).catch(() => {});
-    } else {
-      window.open(`https://wa.me/?text=${encodeURIComponent(text + " " + url)}`, "_blank", "noopener");
+      try { await navigator.share(url ? { text, url } : { text }); return; }
+      catch (err) { if (err && err.name === "AbortError") return; }
     }
+    try { await navigator.clipboard.writeText(full); toast("Nachricht kopiert – jetzt z.B. in Signal einfügen"); }
+    catch { prompt("Zum Kopieren:", full); }
   }
-  const whatsapp = (text, url) => `https://wa.me/?text=${encodeURIComponent(text + "\n" + url)}`;
+  const shareAttrs = (text, url) => `data-share-text="${esc(text)}" data-share-url="${esc(url)}"`;
 
   const links = {
     join: (code) => `${BASE}#/g/${code}`,
@@ -348,8 +351,7 @@
           <button class="btn ghost" id="copyjoin" type="button">Kopieren</button>
         </div>
         <div class="btns">
-          <a class="btn green" href="${whatsapp(inviteText, joinLink)}" target="_blank" rel="noopener">Per WhatsApp teilen</a>
-          ${navigator.share ? `<button class="btn ghost" id="sharejoin" type="button">Teilen…</button>` : ""}
+          <button class="btn green" type="button" ${shareAttrs(inviteText, joinLink)}>Einladung teilen</button>
         </div>
       </div>` : ""}
 
@@ -366,7 +368,7 @@
                 ${p.has_wishlist ? ' <span class="pill" title="Hat einen Wunschzettel">📝</span>' : ""}
               </span>
               <span class="actions">
-                <a class="btn small ghost" href="${whatsapp(`🎁 ${d.name}: Hier ist dein persönlicher Wichtel-Link, ${p.name} (nicht weitergeben!):`, links.me(p.token))}" target="_blank" rel="noopener" title="Persönlichen Link per WhatsApp schicken">WhatsApp</a>
+                <button class="btn small ghost" type="button" ${shareAttrs(`🎁 ${d.name}: Hier ist dein persönlicher Wichtel-Link, ${p.name} (nicht weitergeben!):`, links.me(p.token))} title="Persönlichen Link schicken">Teilen</button>
                 <button class="btn small ghost" data-copy="${esc(links.me(p.token))}" type="button" title="Persönlichen Link kopieren">Link</button>
                 ${!d.drawn ? `<button class="btn small danger-text" data-remove="${esc(p.id)}" data-name="${esc(p.name)}" type="button" title="Entfernen">✕</button>` : ""}
               </span>
@@ -411,7 +413,7 @@
         <h2>Ausgelost 🎉</h2>
         <p class="muted">Sag allen Bescheid, dass sie über ihren persönlichen Link nachschauen können.</p>
         <div class="btns">
-          <a class="btn green" href="${whatsapp(`🎁 ${d.name}: Die Lose sind gezogen! Schaut über euren persönlichen Link nach, wen ihr beschenkt. Link verloren? Sagt mir Bescheid.`, "")}" target="_blank" rel="noopener">Allen Bescheid sagen</a>
+          <button class="btn green" type="button" ${shareAttrs(`🎁 ${d.name}: Die Lose sind gezogen! Schaut über euren persönlichen Link nach, wen ihr beschenkt. Link verloren? Sagt mir Bescheid.`, "")}>Allen Bescheid sagen</button>
         </div>
         <details style="margin-top:16px">
           <summary class="muted">Auslosung zurücksetzen</summary>
@@ -455,7 +457,7 @@
 
     $("#copyadmin").addEventListener("click", () => copy(links.admin(token)));
     $("#copyjoin")?.addEventListener("click", () => copy(joinLink));
-    $("#sharejoin")?.addEventListener("click", () => share(inviteText, joinLink));
+    $$("[data-share-text]").forEach((b) => b.addEventListener("click", () => share(b.dataset.shareText, b.dataset.shareUrl)));
     $$("[data-copy]").forEach((b) => b.addEventListener("click", () => copy(b.dataset.copy)));
     $$("[data-remove]").forEach((b) => b.addEventListener("click", () => {
       if (!confirm(`${b.dataset.name} wirklich entfernen?`)) return;
